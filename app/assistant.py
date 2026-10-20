@@ -5,7 +5,7 @@ import os
 import re
 from datetime import datetime, timedelta
 
-from . import brain, db, report, spam
+from . import brain, db, report, smalltalk, spam
 from .dates_it import format_when, parse
 
 DEFAULTS = {"assistente": os.getenv("NOME_ASSISTENTE", "Aria"), "utente": os.getenv("NOME_UTENTE", "Capo"),
@@ -164,6 +164,13 @@ HELP = ("Posso: bloccare lo spam, farti il report di chiamate, messaggi ed email
         "(«ricordami domani alle 15 il dentista»), registrare («registra»), e suggerirti risposte "
         "(«come rispondo a Marco?»). Chiedimi anche «cosa ho oggi?» o «blocca il numero ...».")
 
+def _unknown(s: dict) -> str:
+    import random
+    esempi = ["«ricordami domani alle 15 il dentista»", "«cosa ho oggi?»", "«fammi il report»", "«come rispondo a Marco?»",
+              "«registra la riunione»", "«quanto fa 12 per 7»", "«raccontami una barzelletta»", "«quanti giorni mancano a Natale?»"]
+    return (random.choice(["Questa non l'ho capita.", "Qui mi hai fregata.", "Non so ancora rispondere a questo."]) +
+            " Provami con " + ", ".join(random.sample(esempi, 3)) +
+            ". Per le conversazioni libere installa Ollama (vedi README): lo uso solo in locale.")
 
 def handle(text: str, history: list[dict] | None = None) -> dict:
     s = settings()
@@ -220,6 +227,15 @@ def handle(text: str, history: list[dict] | None = None) -> dict:
                          f"{report.pl(cnt['emails_spam'], 'email', 'email')}). "
                          f"In lista nera {'c' + chr(39) + 'è' if bl == 1 else 'ci sono'} {report.pl(bl, 'numero', 'numeri')}.", "intent": "spam", "action": "open:inbox"}
 
+    # --- timer: "imposta un timer di 10 minuti" -> promemoria tra 10 minuti
+    mt = re.search(r"(?:imposta|metti|avvia|fai partire|crea)\s+(?:un |il )?(?:timer|sveglia|conto alla rovescia)\s+(?:di|da|per)\s+(\d+)\s*(minut|or)", low)
+    if mt:
+        unit = "minuti" if mt.group(2) == "minut" else "ore"
+        r = handle(f"ricordami tra {mt.group(1)} {unit} che il timer è finito", history)
+        if r.get("data", {}).get("id"):
+            db.x("UPDATE agenda SET reminded=1 WHERE id=?", (r["data"]["id"],))   # niente preavviso: suona solo allo scadere
+            r["reply"] = f"Timer di {mt.group(1)} {unit} avviato. Ti avviso allo scadere."
+        return r
     # --- agenda: elenco
     listing = re.search(r"(cosa|quali|che|quanti)\b.*\b(ho|impegni|appuntament|programma|agenda|da fare)|\bagenda\b|miei impegni|"
                         r"prossimi impegni|promemoria\b$|dammi gli impegni|leggi.*(agenda|impegni)", low)
@@ -293,14 +309,15 @@ def handle(text: str, history: list[dict] | None = None) -> dict:
         return {"reply": _greeting(s), "intent": "saluto"}
     if re.search(r"cosa sai fare|aiuto|help|cosa puoi fare|come funzioni", low):
         return {"reply": HELP, "intent": "aiuto"}
-    if re.fullmatch(r"(grazie|ti ringrazio|grazie mille|perfetto|ok|va bene)[ !.]*", low):
-        return {"reply": "Di nulla! Sono qui se ti serve altro.", "intent": "cortesia"}
+    # --- chiacchiere, calcoli, conversioni, timer, barzellette... (app/smalltalk.py)
+    st = smalltalk.reply(low, raw, s, n, history)
+    if st:
+        if st.get("rewrite"):
+            return handle(st["rewrite"], history)
+        return st
 
     # --- conversazione libera: modello locale
     ans = brain.chat(history or [], raw, context(), s["assistente"], s["utente"])
     if ans:
         return {"reply": ans, "intent": "llm", "source": brain.status()["model"]}
-    return {"reply": "Questo non so farlo con le regole base, e il modello linguistico locale non è attivo. "
-                     "Prova con: «ricordami domani alle 15 il dentista», «cosa ho oggi?», «fammi il report», "
-                     "«come rispondo a Marco?», «registra». Per le conversazioni libere installa Ollama (vedi README).",
-            "intent": "sconosciuto"}
+    return {"reply": _unknown(s), "intent": "sconosciuto"}
