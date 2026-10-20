@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -63,7 +62,7 @@ async def status(request):
     r = report.build("24h", n)
     return J({
         "settings": s, "now": n.isoformat(timespec="seconds"),
-        "llm": llm, "tts": t, "stt_server": voice.stt_available(), "mail": mail.configured(),
+        "llm": llm, "tts": t, "version": __import__("app").VERSION, "stt_server": voice.stt_available(), "stt": voice.stt_state(), "mail": mail.configured(),
         "counts": r["counts"], "empty": db.q("SELECT COUNT(*) c FROM events", one=True)["c"] == 0
         and db.q("SELECT COUNT(*) c FROM agenda", one=True)["c"] == 0,
     })
@@ -254,7 +253,10 @@ async def recordings_api(request):
                    (datetime.now().isoformat(timespec="seconds"), fname, int(float(form.get("duration") or 0)), title))
         if voice.stt_available():
             def work():
-                t = voice.transcribe(str(REC_DIR / fname))
+                try:
+                    t = voice.transcribe(str(REC_DIR / fname))
+                except Exception:
+                    return
                 if t:
                     db.x("UPDATE recordings SET transcript=? WHERE id=?", (t, rid))
             threading.Thread(target=work, daemon=True).start()
@@ -311,6 +313,9 @@ async def transcribe(request):
         tmp.write(await up.read())
     try:
         text = await asyncio.get_running_loop().run_in_executor(None, voice.transcribe, tmp.name)
+    except Exception as e:
+        return J({"error": "Il modello vocale non è disponibile: " + str(e)[:200] +
+                  " (il primo avvio scarica il modello da internet)"}, 503)
     finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp.name)
@@ -331,6 +336,20 @@ async def reset_api(request):
     return J({"ok": True})
 
 
+async def shutdown_api(request):
+    """Spegnimento pulito dal pulsante «Spegni Aria»: risponde, poi fa uscire uvicorn con calma."""
+    from . import runtime
+
+    async def later():
+        await asyncio.sleep(0.6)
+        if runtime.server is not None:
+            runtime.server.should_exit = True
+        else:
+            os._exit(0)
+    asyncio.get_running_loop().create_task(later())
+    return J({"ok": True})
+
+
 # ------------------------------------------------------------------ file statici / PWA
 async def index(request):
     return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
@@ -347,6 +366,7 @@ async def manifest(request):
 @contextlib.asynccontextmanager
 async def lifespan(app):
     db.conn()
+    voice.preload()
     task = None
     if mail.configured():
         async def loop():
@@ -384,6 +404,7 @@ routes = [
     Route("/api/mail/sync", mail_sync, methods=["POST"]),
     Route("/api/demo", seed_api, methods=["POST"]),
     Route("/api/reset", reset_api, methods=["POST"]),
+    Route("/api/shutdown", shutdown_api, methods=["POST"]),
     Mount("/static", StaticFiles(directory=WEB, check_dir=False), name="static"),
 ]
 

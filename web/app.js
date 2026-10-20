@@ -1,3 +1,4 @@
+/* Segretaria AI — interfaccia. Nessuna dipendenza esterna. */
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -6,7 +7,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { } },
 };
- 
+
 const S = {
   status: null, inboxKind: "all", events: [], lastEventId: 0, history: [], busy: false,
   speaking: false, speakId: 0, listening: false, srvStop: null, recording: null, audio: null, pendingWake: null,
@@ -14,7 +15,7 @@ const S = {
 };
 const savePrefs = () => store.set("prefs", S.prefs);
 if (!store.get("alwaysOn1", false)) { S.prefs.continuous = true; S.prefs.wake = S.prefs.wake !== false; store.set("alwaysOn1", true); savePrefs(); }   // una tantum: microfono sempre attivo
- 
+
 /* ------------------------------------------------------------------ API */
 async function api(path, opt = {}) {
   const headers = Object.assign({}, opt.headers);
@@ -34,7 +35,7 @@ async function api(path, opt = {}) {
   return ct.includes("json") ? r.json() : r.blob();
 }
 const tokQ = () => { const t = store.get("token", ""); return t ? "?token=" + encodeURIComponent(t) : ""; };
- 
+
 /* ------------------------------------------------------------------ UI base */
 function setState(st) { document.body.dataset.state = st; $("#btnMic").classList.toggle("stop", st === "speaking"); $("#btnMic").setAttribute("aria-label", st === "speaking" ? "Zittisci e parla" : "Parla"); $("#hudState").textContent = ({ idle: "pronta", listening: "ti ascolto", thinking: "elaboro", speaking: "parlo", recording: "registro" })[st] || st; }
 function baseState() { setState(S.recording ? "recording" : S.listening ? "listening" : "idle"); }
@@ -55,14 +56,14 @@ function setTab(t) {
   $$("#bottom button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
 }
 $("#bottom").addEventListener("click", e => { const b = e.target.closest("button"); if (b) setTab(b.dataset.t); });
- 
+
 /* ------------------------------------------------------------------ voce in uscita */
 let voices = [];
 function loadVoices() { voices = (speechSynthesis?.getVoices?.() || []); }
 if ("speechSynthesis" in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
- 
+
 function cleanForSpeech(t) { return t.replace(/[«»*_`#]/g, "").replace(/https?:\/\/\S+/g, "link").replace(/\s+/g, " ").trim(); }
- 
+
 async function speak(text) {
   if (!text) return;
   stopSpeaking();
@@ -102,7 +103,7 @@ function stopSpeaking() {
   if (S.audio) { S.audio.onended = S.audio.onerror = null; S.audio.pause(); S.audio = null; }
   S.speaking = false;
 }
- 
+
 /* ------------------------------------------------------------------ voce in ingresso */
 // Opera (come Brave e Chromium) espone SpeechRecognition ma senza il servizio vocale: non funziona mai. La escludiamo.
 const IS_OPERA = /\bOPR\/|Opera/.test(navigator.userAgent);
@@ -126,7 +127,7 @@ function fatalListenError(msg, code) {
   S.fatalListen = true; S.prefs.continuous = false; savePrefs();
   toast("Microfono: " + (code || "errore"), msg, "red");
 }
- 
+
 function startListening() {
   if (S.listening) return;
   if (S.speaking) stopSpeaking();
@@ -172,6 +173,7 @@ function startListening() {
     if (!mine() || S.listening) return;
     let perm = "?"; try { perm = (await navigator.permissions.query({ name: "microphone" })).state; } catch { }
     if (perm === "prompt" && waited < 20000) { waited += 5000; return setTimeout(check, 5000); }   // sta ancora aspettando il tuo «Consenti»
+    if (navigator.userActivation && !navigator.userActivation.hasBeenActive) { rec = null; try { r.abort(); } catch { } return; }   // senza un tuo gesto il browser non lo avvia: non è un errore
     rec = null; try { r.abort(); } catch { } srFails += 2;
     $("#btnMic").classList.remove("on"); baseState();
     if (micMode() === "server") { toast("Passo all'ascolto locale", "Il riconoscimento del browser non è partito.", "amber"); listenViaServer(); }
@@ -179,7 +181,7 @@ function startListening() {
   };
   setTimeout(check, 3500);
 }
- 
+
 /* Ascolto tramite il server: registra finché smetti di parlare, poi trascrive in locale (faster-whisper). */
 async function listenViaServer() {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { toast("Ascolto non disponibile", "Il browser non può registrare l'audio (serve localhost o HTTPS).", "red"); return; }
@@ -240,7 +242,7 @@ async function listenViaServer() {
   mr.onstop = finish;
   try { mr.start(250); } catch (e) { cleanup(); toast("Registrazione non avviata", e.message || String(e), "red"); }
 }
- 
+
 function stopListening() {
   clearTimeout(restartT); if (S.srvStop) { S.srvStop(true); return; }
   const r = rec; rec = null; try { r && r.abort(); } catch { }
@@ -252,7 +254,7 @@ function pauseListening() {
   S.listening = false; $("#btnMic").classList.remove("on");
 }
 function resumeListening() { if (S.prefs.continuous && !S.busy && !S.fatalListen) { clearTimeout(restartT); restartT = setTimeout(startListening, 500); } }
- 
+
 function wakeName() { return (S.status?.settings.assistente || "aria").toLowerCase(); }
 function onUtterance(text) {
   if (!S.prefs.continuous) return send(text);          // tocca-e-parla: tutto ciò che dici è un comando
@@ -266,7 +268,7 @@ function onUtterance(text) {
   else { S.pendingWake = Date.now() + 12000; speak("Dimmi."); }
 }
 const openConversation = () => { S.pendingWake = Date.now() + 25000; };   // dopo una risposta puoi continuare 25 s senza il nome
- 
+
 /* Il pulsante funziona sempre: se sto parlando mi zittisce e ascolta subito. */
 function micClick() {
   if (S.speaking) { stopSpeaking(); baseState(); startListening(); return; }
@@ -275,7 +277,7 @@ function micClick() {
 }
 $("#btnMic").addEventListener("click", micClick);
 $("#hud").addEventListener("click", () => { if (S.speaking) { stopSpeaking(); baseState(); } });
- 
+
 /* Test guidato: dice esattamente cosa blocca il microfono. */
 async function openMicTest() {
   let perm = "sconosciuto";
@@ -315,7 +317,7 @@ async function openMicTest() {
   };
 }
 $("#chipMic").addEventListener("click", openMicTest);
- 
+
 /* ------------------------------------------------------------------ chat */
 function addMsg(kind, text, extra) {
   const m = document.createElement("div"); m.className = "msg " + kind; m.textContent = text;
@@ -357,8 +359,16 @@ async function send(text) {
     const rs = out.data?.replies;
     addMsg("ai", out.reply, rs ? repliesBox(rs, out.data.source) : null);
     S.busy = false; baseState(); openConversation();
-    handleAction(out);
-    if (S.prefs.speak) await speak(out.reply); else resumeListening();
+    const act = out.action || "";
+    if (act === "start_recording") {                 // prima dice la frase, POI comincia a registrare (così non finisce nel file)
+      if (S.prefs.speak && !S.recording) await speak(out.reply);
+      handleAction(out); resumeListening(); return;
+    }
+    if (act === "stop_recording") {                  // prima chiude la registrazione, POI risponde
+      handleAction(out);
+      for (let i = 0; i < 40 && S.recording; i++) await new Promise(r => setTimeout(r, 50));
+    } else handleAction(out);
+    if (S.prefs.speak && !S.recording) await speak(out.reply); else resumeListening();   // mentre registro resto zitta
   } catch (e) {
     S.busy = false; baseState(); addMsg("ai", "Non riesco a contattare il server: " + e.message); resumeListening();
   }
@@ -376,11 +386,11 @@ function handleAction(out) {
 }
 $("#dock").addEventListener("submit", e => { e.preventDefault(); send($("#txt").value); });
 $("#quick").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { setTab("home"); send(b.dataset.q); } });
- 
+
 /* ------------------------------------------------------------------ comunicazioni */
 const KIND_ICO = { call: "i-call", sms: "i-msg", whatsapp: "i-msg", email: "i-mail" };
 const KIND_LBL = { call: "Chiamata", sms: "SMS", whatsapp: "WhatsApp", email: "Email" };
- 
+
 async function loadInbox(initial) {
   const kind = S.inboxKind === "all" ? "" : "&kind=" + S.inboxKind;
   const [rows] = await Promise.all([api("/api/events?limit=80" + kind)]);
@@ -450,7 +460,7 @@ $("#inboxTabs").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
   S.inboxKind = b.dataset.k; $$("#inboxTabs button").forEach(x => x.classList.toggle("on", x === b)); loadInbox();
 });
- 
+
 /* ------------------------------------------------------------------ agenda */
 async function loadAgenda() {
   const rows = await api("/api/agenda");
@@ -473,7 +483,7 @@ $("#agendaForm").addEventListener("submit", async e => {
   e.preventDefault(); const t = $("#agendaText").value.trim(); if (!t) return;
   await api("/api/agenda", { body: { text: t } }); $("#agendaText").value = ""; loadAgenda();
 });
- 
+
 /* ------------------------------------------------------------------ registrazioni */
 function pickMime() {
   const c = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
@@ -518,7 +528,7 @@ $("#recList").addEventListener("click", async e => {
   if (act === "del" && confirm("Eliminare questa registrazione?")) { await api("/api/recordings/" + id, { method: "DELETE" }); loadRecs(); }
   if (act === "ren") { const t = prompt("Nuovo titolo:"); if (t) { await api("/api/recordings/" + id, { method: "PATCH", body: { title: t } }); loadRecs(); } }
 });
- 
+
 /* ------------------------------------------------------------------ modali */
 function openModal(html) {
   $("#sheet").innerHTML = `<button class="icon x" aria-label="Chiudi" data-close><svg><use href="#i-x"/></svg></button>${html}`;
@@ -527,7 +537,7 @@ function openModal(html) {
 function closeModal() { $("#modal").hidden = true; }
 $("#modal").addEventListener("click", e => { if (e.target.id === "modal" || e.target.closest("[data-close]")) closeModal(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); if (S.speaking) { stopSpeaking(); baseState(); } } });
- 
+
 async function openReport(period = "24h", speakIt = false) {
   const r = await api("/api/report?period=" + period), c = r.counts;
   const sh = openModal(`<h3>Report ${esc(r.label)}</h3>
@@ -546,7 +556,7 @@ async function openReport(period = "24h", speakIt = false) {
   if (speakIt) speak(r.spoken);
 }
 $("#btnReport").onclick = () => openReport("24h");
- 
+
 async function openSuggest(ev, tone = null) {
   const sh = openModal(`<h3>Come rispondere a ${esc(ev.name || ev.sender)}</h3>
     <div class="msg ai" style="max-width:100%">${esc(ev.subject ? ev.subject + " — " : "")}${esc(ev.body || "")}</div>
@@ -559,7 +569,7 @@ async function openSuggest(ev, tone = null) {
     out.append(repliesBox(r.replies, r.source));
   } catch (e) { $("#sugOut", sh).textContent = "Errore: " + e.message; }
 }
- 
+
 function openSim() {
   const sh = openModal(`<h3>Simulatore</h3>
     <p class="muted" style="margin-bottom:10px">Invia al motore un evento come farebbe il telefono: vedi subito se lo bloccherebbe.</p>
@@ -589,7 +599,7 @@ function openSim() {
   };
 }
 $("#btnSim").onclick = openSim;
- 
+
 /* ------------------------------------------------------------------ impostazioni */
 async function openSettings() {
   const [set, bl, ct] = await Promise.all([api("/api/settings"), api("/api/blocklist"), api("/api/contacts")]);
@@ -621,6 +631,7 @@ async function openSettings() {
     <label class="sw"><input type="checkbox" id="ctVip"> VIP: i suoi messaggi sono sempre importanti</label>
     <div class="acts"><button class="btn" id="ctAdd">Aggiungi contatto</button></div>
     <h4>Dati</h4><div class="acts"><button class="btn sm" id="stDemo">Carica dati demo</button><button class="btn sm red" id="stReset">Cancella tutto</button><button class="btn sm ghost" id="stTok">Token di accesso</button></div>
+    <h4>Aria</h4><div class="acts"><button class="btn sm red" id="stOff">Spegni Aria in sicurezza</button></div>
     <div class="acts" style="margin-top:16px"><button class="btn" id="stSave">Salva</button></div>`);
   $("#stV", sh).value = S.prefs.voice || "";
   const collect = () => { S.prefs.voice = $("#stV", sh).value; S.prefs.rate = +$("#stRate", sh).value; S.prefs.pitch = +$("#stPitch", sh).value; S.prefs.speak = $("#stSpeak", sh).checked; S.prefs.continuous = $("#stCont", sh).checked; S.prefs.wake = $("#stWake", sh).checked; savePrefs(); };
@@ -635,6 +646,13 @@ async function openSettings() {
   });
   $("#blAdd", sh).onclick = async () => { const v = $("#blN", sh).value.trim(); if (v) { await api("/api/blocklist", { body: { pattern: v, reason: "aggiunto a mano" } }); openSettings(); } };
   $("#ctAdd", sh).onclick = async () => { const n = $("#ctNum", sh).value.trim(), nm = $("#ctName", sh).value.trim(); if (n && nm) { await api("/api/contacts", { body: { number: n, name: nm, vip: $("#ctVip", sh).checked } }); openSettings(); } else toast("Mancano dati", "Servono numero e nome.", "amber"); };
+  $("#stOff", sh).onclick = async () => {
+    if (!confirm("Spegnere Aria? Le registrazioni in corso vengono salvate.")) return;
+    if (S.recording) { stopRecording(); for (let i = 0; i < 40 && S.recording; i++) await new Promise(r => setTimeout(r, 100)); }
+    S.prefs = { ...S.prefs, continuous: false }; stopListening(); stopSpeaking();   // solo in memoria: alla prossima apertura riparte
+    try { await api("/api/shutdown", { method: "POST", body: {} }); } catch { }
+    closeModal(); document.body.innerHTML = '<div style="display:grid;place-items:center;height:100vh;font:20px system-ui;color:#8fd">Aria è spenta. Puoi chiudere questa scheda.</div>';
+  };
   $("#stDemo", sh).onclick = async () => { await loadDemo(); closeModal(); };
   $("#stReset", sh).onclick = async () => { if (confirm("Cancellare chiamate, messaggi, agenda, rubrica e lista nera? Le registrazioni audio restano sul disco.")) { await api("/api/reset", { method: "POST", body: {} }); S.lastEventId = 0; refreshAll(); closeModal(); } };
   $("#stTok", sh).onclick = () => { const t = prompt("Token di accesso (vuoto per rimuoverlo):", store.get("token", "")); if (t !== null) store.set("token", t); };
@@ -645,9 +663,9 @@ async function openSettings() {
   };
 }
 $("#btnSettings").onclick = openSettings;
- 
+
 async function loadDemo() { await api("/api/demo", { method: "POST", body: {} }); S.lastEventId = 0; await refreshAll(true); toast("Dati demo caricati", "Prova: «fammi il report» o «come rispondo ad Anna?»"); }
- 
+
 /* ------------------------------------------------------------------ stato, promemoria, notifiche */
 function notify(title, body) { try { if (Notification?.permission === "granted") new Notification(title, { body, icon: "/static/icon-192.png" }); } catch { } }
 function chip(id, ok, text) { const c = $(id); c.className = "chip " + (ok === true ? "ok" : ok === "mid" ? "mid" : ""); $("em", c).textContent = text; }
@@ -678,20 +696,20 @@ async function pollDue() {
 async function refreshAll(initial) {
   try { await Promise.all([loadStatus(), loadInbox(initial), loadAgenda(), loadRecs()]); } catch (e) { console.warn(e); }
 }
- 
+
 /* ------------------------------------------------------------------ avvio */
 (async function boot() {
   setState("idle");
   await refreshAll(true);
+  console.log("Aria versione", S.status?.version);
   if (micMode() === "none") addMsg("ai", "Per parlarmi con " + (IS_OPERA ? "Opera" : "questo browser") + " serve la trascrizione locale: nel terminale scrivi  pip install faster-whisper  e riavvia. Intanto puoi scrivermi qui sotto. Clicca «Ascolto» in alto per la guida.");
   addMsg("ai", S.status?.empty ? `Ciao, sono ${S.status.settings.assistente}. Per cominciare scrivimi un comando, oppure carica i dati demo dal pannello a sinistra.` : "Pronta. Dimmi pure.");
   setInterval(() => loadInbox().then(loadStatus).catch(() => { }), 20000);
   setInterval(pollDue, 15000); pollDue();
   setInterval(() => { if (srFails > 0) srFails--; }, 60000);      // dopo un po riprova col browser
-  if (S.prefs.continuous) startListening();
+  if (S.prefs.continuous) { if (navigator.userActivation?.hasBeenActive) startListening(); else $("#live").textContent = "Tocca la pagina per attivare il microfono…"; }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => { });
   const kick = () => { if (S.prefs.continuous && !S.listening && !S.speaking && !S.fatalListen) startListening(); };
   ["pointerdown", "keydown"].forEach(ev => document.addEventListener(ev, kick, { once: true }));
   setInterval(() => { if (document.visibilityState === "visible" && S.prefs.continuous && !S.listening && !S.speaking && !S.busy && !S.fatalListen) startListening(); }, 4000);
 })();
- 

@@ -59,8 +59,25 @@ def main() -> None:
     ap.add_argument("--https", action="store_true", help="HTTPS con certificato autofirmato")
     ap.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")))
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--installa-ascolto", action="store_true",
+                    help="installa faster-whisper: ascolto vocale offline (necessario su Opera GX, Brave, Firefox)")
     a = ap.parse_args()
     load_env()
+
+    if a.installa_ascolto:
+        print("Installo faster-whisper (circa 200 MB, serve internet)...")
+        rc = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "faster-whisper"]).returncode
+        if rc == 0:
+            print("\nFatto. Avvia con:  python run.py")
+            print("Al primo avvio scarica il modello vocale (una volta sola, serve internet).")
+        sys.exit(rc)
+
+    try:
+        import faster_whisper  # noqa: F401
+        print("  Ascolto locale: faster-whisper trovato.")
+    except ImportError:
+        print("  Se usi Opera GX, Brave o Firefox il browser non sa ascoltare la voce.")
+        print("  Installa l'ascolto locale una volta sola:  python run.py --installa-ascolto")
 
     import uvicorn
     ip = lan_ip()
@@ -72,7 +89,8 @@ def main() -> None:
         scheme = "https"
     host = "0.0.0.0" if a.lan else "127.0.0.1"
 
-    print("\n  Segretaria AI")
+    from app import VERSION
+    print(f"\n  Aria  (versione {VERSION})")
     print(f"  Su questo PC:   {scheme}://localhost:{a.port}")
     if a.lan:
         print(f"  Dal telefono:   {scheme}://{ip}:{a.port}   (stessa Wi-Fi)")
@@ -83,7 +101,24 @@ def main() -> None:
     print("  Ctrl+C per fermare.\n")
     if not a.no_browser and not a.lan:
         webbrowser.open(f"{scheme}://localhost:{a.port}")
-    uvicorn.run("app.main:app", host=host, port=a.port, log_level="warning", **kw)
+    from app import runtime
+    config = uvicorn.Config("app.main:app", host=host, port=a.port, log_level="warning", **kw)
+    server = uvicorn.Server(config)
+    runtime.server = server
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            from app import db
+            db.conn().commit()
+            db.conn().close()
+        except Exception:
+            pass
+        print("\n  Aria spenta. A presto!")
+        sys.stdout.flush()
+        os._exit(0)      # chiude subito, senza i messaggi d'errore delle librerie che si spengono dopo di noi
 
 
 if __name__ == "__main__":
