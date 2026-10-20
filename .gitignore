@@ -1,0 +1,9 @@
+.env
+.venv/
+__pycache__/
+archivio/*
+output/*
+voci/*
+!archivio/.gitkeep
+!output/.gitkeep
+!voci/.gitkeep

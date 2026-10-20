@@ -1,0 +1,7 @@
+starlette>=0.37
+uvicorn>=0.30
+python-multipart>=0.0.9
+
+# --- opzionali (decommenta quello che ti serve) ---
+# faster-whisper     # trascrizione offline delle registrazioni (consigliato: modello "base" o "small")
+# piper-tts          # voci neurali offline per la segretaria (poi metti i file .onnx in voci/)

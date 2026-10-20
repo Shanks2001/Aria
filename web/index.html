@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#040b14">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<title>Segretaria AI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-state="idle" data-tab="home">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-call" viewBox="0 0 24 24"><path d="M6.6 10.8a15 15 0 006.6 6.6l2.2-2.2a1 1 0 011-.25 11.4 11.4 0 003.6.6 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1c0 1.25.2 2.45.6 3.6a1 1 0 01-.25 1z"/></symbol>
+    <symbol id="i-msg" viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 012 2v10a2 2 0 01-2 2H8l-4 4V6a2 2 0 012-2z"/></symbol>
+    <symbol id="i-mail" viewBox="0 0 24 24"><path d="M3 5h18v14H3zM3 6l9 7 9-7"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 2.5a3 3 0 013 3V11a3 3 0 01-6 0V5.5a3 3 0 013-3zM5.5 11a6.5 6.5 0 0013 0M12 17.5V21"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.5l8 3v6c0 5-3.5 8.6-8 10-4.5-1.400-8-5-8-10v-6z"/></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24"><path d="M4 5.5h16V20H4zM4 10h16M8 3v4M16 3v4"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9M13 5v4M7 15v4"/></symbol>
+    <symbol id="i-report" viewBox="0 0 24 24"><path d="M5 3h14v18H5zM9 8h6M9 12h6M9 16h4"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M3 11l18-8-8 18-2-8z"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  </defs>
+</svg>
+
+<header class="top">
+  <div class="brand"><span id="brandName">A.R.I.A.</span><small>segretaria personale</small></div>
+  <div class="chips">
+    <span class="chip" id="chipLlm" title="Modello linguistico"><i></i><b>Cervello</b> <em>…</em></span>
+    <span class="chip" id="chipVoice" title="Voce"><i></i><b>Voce</b> <em>…</em></span>
+    <span class="chip" id="chipMic" title="Riconoscimento vocale"><i></i><b>Ascolto</b> <em>…</em></span>
+  </div>
+  <div class="tools">
+    <button class="icon" id="btnReport" title="Report" aria-label="Report"><svg><use href="#i-report"/></svg></button>
+    <button class="icon" id="btnSim" title="Simula chiamata o messaggio" aria-label="Simulatore"><svg><use href="#i-bolt"/></svg></button>
+    <button class="icon" id="btnSettings" title="Impostazioni" aria-label="Impostazioni"><svg><use href="#i-sliders"/></svg></button>
+  </div>
+</header>
+
+<main class="grid">
+
+  <!-- ===================== sinistra: comunicazioni ===================== -->
+  <section class="panel side" data-pane="inbox" aria-label="Comunicazioni">
+    <div class="panel-h">
+      <h2>Comunicazioni</h2>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div class="tabs" id="inboxTabs" role="tablist">
+      <button class="on" data-k="all">Tutte</button><button data-k="call">Chiamate</button>
+      <button data-k="msg">Messaggi</button><button data-k="email">Email</button>
+    </div>
+    <div class="list" id="inboxList"></div>
+  </section>
+
+  <!-- ===================== centro: HUD ===================== -->
+  <section class="center" data-pane="home" aria-label="Assistente">
+    <div class="hud" id="hud">
+      <svg viewBox="-260 -260 520 520" aria-hidden="true">
+        <defs>
+          <radialGradient id="core" cx="50%" cy="50%" r="50%">
+            <stop offset="0" stop-color="#3fd8ff" stop-opacity=".28"/><stop offset="1" stop-color="#3fd8ff" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <circle class="glow" r="150" fill="url(#core)"/>
+        <g class="spin s-60"><circle r="246" class="r1" stroke-dasharray="520 40 90 40 240 40 380 40"/></g>
+        <g class="spin s-90 rev"><circle r="226" class="ticks" stroke-dasharray="1.6 9.6"/></g>
+        <g class="spin s-140"><circle r="198" class="band" stroke-dasharray="720 170"/>
+          <circle r="3.2" class="dot" cx="0" cy="-198"/><circle r="3.2" class="dot" cx="38" cy="-194"/>
+          <circle r="3.2" class="dot" cx="76" cy="-183"/><circle r="3.2" class="dot" cx="112" cy="-163"/></g>
+        <g class="spin s-45 rev"><circle r="172" class="amber" stroke-dasharray="210 870"/></g>
+        <circle r="150" class="r2"/>
+        <g class="spin s-30"><circle r="132" class="r3" stroke-dasharray="3 7"/></g>
+        <circle r="104" class="disc"/>
+      </svg>
+      <div class="hud-core">
+        <div class="hud-name" id="hudName">A.R.I.A.</div>
+        <div class="hud-state" id="hudState">pronta</div>
+      </div>
+    </div>
+
+    <div class="convo" id="convo" aria-live="polite"></div>
+    <div class="live" id="live"></div>
+
+    <form class="dock" id="dock" autocomplete="off">
+      <button type="button" class="mic" id="btnMic" aria-label="Parla"><svg><use href="#i-mic"/></svg></button>
+      <input id="txt" placeholder="Scrivi o parla: «ricordami domani alle 15 il dentista»" aria-label="Messaggio">
+      <button class="icon send" aria-label="Invia"><svg><use href="#i-send"/></svg></button>
+    </form>
+    <div class="quick" id="quick">
+      <button data-q="fammi il report">Report</button>
+      <button data-q="cosa ho oggi?">Cosa ho oggi?</button>
+      <button data-q="registra">Registra</button>
+      <button data-q="come rispondo all'ultimo messaggio?">Come rispondo?</button>
+    </div>
+  </section>
+
+  <!-- ===================== destra: agenda + registrazioni ===================== -->
+  <div class="side-r">
+    <section class="panel" data-pane="agenda" aria-label="Agenda">
+      <div class="panel-h"><h2>Agenda</h2><span class="muted" id="agendaCount"></span></div>
+      <form class="inline" id="agendaForm" autocomplete="off">
+        <input id="agendaText" placeholder="Es. giovedì alle 18 palestra" aria-label="Nuovo impegno">
+        <button class="btn">Aggiungi</button>
+      </form>
+      <div class="list" id="agendaList"></div>
+    </section>
+    <section class="panel" data-pane="rec" aria-label="Registrazioni">
+      <div class="panel-h"><h2>Registrazioni</h2><span class="muted" id="recTimer"></span></div>
+      <button class="rec-btn" id="btnRec"><span class="dot"></span><span id="recLabel">Inizia a registrare</span></button>
+      <div class="list" id="recList"></div>
+    </section>
+  </div>
+</main>
+
+<nav class="bottom" id="bottom">
+  <button data-t="inbox"><svg><use href="#i-call"/></svg><span>Posta</span><b id="bdgInbox" hidden></b></button>
+  <button data-t="home" class="on"><svg><use href="#i-home"/></svg><span>Aria</span></button>
+  <button data-t="agenda"><svg><use href="#i-cal"/></svg><span>Agenda</span></button>
+  <button data-t="rec"><svg><use href="#i-mic"/></svg><span>Registra</span></button>
+</nav>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="modal" id="modal" hidden><div class="sheet" id="sheet"></div></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

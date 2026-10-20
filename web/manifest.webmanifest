@@ -1,0 +1,16 @@
+{
+  "name": "Segretaria AI",
+  "short_name": "Aria",
+  "description": "Segretaria personale: spam, report, voce, registrazioni, agenda e risposte.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#040b14",
+  "theme_color": "#040b14",
+  "lang": "it",
+  "icons": [
+    {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
