@@ -1,4 +1,4 @@
-
+/* Segretaria AI — interfaccia. Nessuna dipendenza esterna. */
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -10,7 +10,7 @@ const store = {
 
 const S = {
   status: null, inboxKind: "all", events: [], lastEventId: 0, history: [], busy: false,
-  speaking: false, listening: false, recording: null, audio: null, pendingWake: null,
+  speaking: false, speakId: 0, listening: false, srvStop: null, recording: null, audio: null, pendingWake: null,
   prefs: Object.assign({ speak: true, continuous: false, voice: "", rate: 1, pitch: 1 }, store.get("prefs", {})),
 };
 const savePrefs = () => store.set("prefs", S.prefs);
@@ -36,7 +36,7 @@ async function api(path, opt = {}) {
 const tokQ = () => { const t = store.get("token", ""); return t ? "?token=" + encodeURIComponent(t) : ""; };
 
 /* ------------------------------------------------------------------ UI base */
-function setState(st) { document.body.dataset.state = st; $("#hudState").textContent = ({ idle: "pronta", listening: "ti ascolto", thinking: "elaboro", speaking: "parlo", recording: "registro" })[st] || st; }
+function setState(st) { document.body.dataset.state = st; $("#btnMic").classList.toggle("stop", st === "speaking"); $("#btnMic").setAttribute("aria-label", st === "speaking" ? "Zittisci e parla" : "Parla"); $("#hudState").textContent = ({ idle: "pronta", listening: "ti ascolto", thinking: "elaboro", speaking: "parlo", recording: "registro" })[st] || st; }
 function baseState() { setState(S.recording ? "recording" : S.listening ? "listening" : "idle"); }
 function toast(title, text = "", kind = "") {
   const t = document.createElement("div"); t.className = "toast " + kind;
@@ -66,76 +66,191 @@ function cleanForSpeech(t) { return t.replace(/[«»*_`#]/g, "").replace(/https?
 async function speak(text) {
   if (!text) return;
   stopSpeaking();
+  const id = ++S.speakId;
   const clean = cleanForSpeech(text);
   S.speaking = true; setState("speaking"); pauseListening();
-  const done = () => { S.speaking = false; baseState(); resumeListening(); };
+  let finished = false;
+  const done = () => { if (finished || id !== S.speakId) return; finished = true; S.speaking = false; baseState(); resumeListening(); };
+  // Rete di sicurezza: alcuni browser non segnalano mai la fine della frase e la segretaria resterebbe "in parlato" per sempre.
+  const watchdog = setTimeout(() => { if (id === S.speakId && S.speaking) { try { speechSynthesis.cancel(); } catch { } S.audio?.pause(); done(); } },
+    (2500 + clean.length * 90) / Math.max(.5, S.prefs.rate));
+  const end = () => { clearTimeout(watchdog); done(); };
   try {
     const wantServer = (S.prefs.voice || "").startsWith("server:") || (!S.prefs.voice && S.status && S.status.tts.engine !== "browser");
     if (wantServer && S.status.tts.engine !== "browser") {
       const blob = await api("/api/tts", { body: { text: clean, voice: (S.prefs.voice || "").replace("server:", "") } });
+      if (id !== S.speakId) return;                      // nel frattempo l'utente ha interrotto
       if (blob) {
         const a = new Audio(URL.createObjectURL(blob)); S.audio = a;
         a.playbackRate = S.prefs.rate;
-        a.onended = a.onerror = done;
+        a.onended = a.onerror = end;
         await a.play(); return;
       }
     }
-  } catch { /* ripiega sulla voce del browser */ }
-  if (!("speechSynthesis" in window)) return done();
+  } catch { if (id !== S.speakId) return; }
+  if (!("speechSynthesis" in window)) return end();
   const u = new SpeechSynthesisUtterance(clean);
   u.lang = "it-IT"; u.rate = S.prefs.rate; u.pitch = S.prefs.pitch;
   const v = voices.find(v => v.name === S.prefs.voice) || voices.find(v => v.lang?.toLowerCase().startsWith("it"));
   if (v) u.voice = v;
-  u.onend = u.onerror = done;
+  u.onend = u.onerror = end;
   speechSynthesis.speak(u);
 }
 function stopSpeaking() {
+  S.speakId++;                                           // invalida qualunque parlato in corso o in preparazione
   try { speechSynthesis.cancel(); } catch { }
-  if (S.audio) { S.audio.onended = null; S.audio.pause(); S.audio = null; }
+  if (S.audio) { S.audio.onended = S.audio.onerror = null; S.audio.pause(); S.audio = null; }
   S.speaking = false;
 }
 
 /* ------------------------------------------------------------------ voce in ingresso */
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, restartT = null;
+// Opera (come Brave e Chromium) espone SpeechRecognition ma senza il servizio vocale: non funziona mai. La escludiamo.
+const IS_OPERA = /\bOPR\/|Opera/.test(navigator.userAgent);
+const SR = IS_OPERA ? null : (window.SpeechRecognition || window.webkitSpeechRecognition);
+let rec = null, restartT = null, srFails = 0;
+const SR_ERR = {
+  "not-allowed": "Il browser ha bloccato il microfono. Clicca il lucchetto vicino all'indirizzo, consenti il microfono e ricarica la pagina.",
+  "service-not-allowed": "Il browser non permette il riconoscimento vocale su questa pagina: serve localhost o HTTPS.",
+  "audio-capture": "Non trovo nessun microfono. Controlla che sia collegato e selezionato come ingresso del sistema.",
+  "network": "Il riconoscimento vocale del browser non riesce a collegarsi al suo servizio: serve internet e un browser come Chrome o Edge (non funziona su Brave, Chromium, Firefox).",
+  "language-not-supported": "Il browser non supporta il riconoscimento vocale in italiano.",
+};
+/* modalità di ascolto disponibile: browser (SpeechRecognition) → server (faster-whisper) → nessuna */
+function micMode() {
+  const srv = !!S.status?.stt_server;
+  if (SR && (srFails < 2 || !srv)) return "browser";
+  return srv ? "server" : "none";
+}
+function fatalListenError(msg, code) {
+  S.fatalListen = true; S.prefs.continuous = false; savePrefs();
+  toast("Microfono: " + (code || "errore"), msg, "red");
+}
 
-function makeRec() {
-  if (!SR) return null;
-  const r = new SR();
+function startListening() {
+  if (S.listening) return;
+  if (S.speaking) stopSpeaking();
+  const mode = micMode();
+  if (mode === "none") { toast("Per parlarmi serve un passo in più", "Questo browser non ha il riconoscimento vocale. Apro la guida.", "amber"); openMicTest(); return; }
+  S.fatalListen = false;
+  if (mode === "server") return listenViaServer();
+  const old = rec; rec = null; try { old && old.abort(); } catch { }
+  const r = new SR(); rec = r;
   r.lang = "it-IT"; r.interimResults = true; r.continuous = false; r.maxAlternatives = 1;
-  r.onstart = () => { S.listening = true; $("#btnMic").classList.add("on"); if (!S.speaking && !S.busy) baseState(); };
+  const mine = () => rec === r;                          // ignora gli eventi tardivi di una sessione già sostituita
+  r.onstart = () => { if (!mine()) return; S.listening = true; $("#btnMic").classList.add("on"); if (!S.speaking && !S.busy) baseState(); };
   r.onresult = ev => {
+    if (!mine()) return;
     let interim = "", final = "";
-    for (let i = ev.resultIndex; i < ev.results.length; i++) {
-      const t = ev.results[i][0].transcript;
-      ev.results[i].isFinal ? final += t : interim += t;
-    }
+    for (let i = ev.resultIndex; i < ev.results.length; i++) { const t = ev.results[i][0].transcript; ev.results[i].isFinal ? final += t : interim += t; }
     $("#live").textContent = interim || final;
-    if (final.trim()) onUtterance(final.trim());
+    if (final.trim()) { srFails = 0; onUtterance(final.trim()); }
   };
   r.onerror = e => {
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-      S.prefs.continuous = false; savePrefs();
-      toast("Microfono bloccato", "Consenti l'uso del microfono nel browser (serve HTTPS o localhost).", "red");
+    if (!mine()) return;
+    const c = e.error;
+    if (c === "no-speech") { $("#live").textContent = "Non ti ho sentito: riprova."; return; }
+    if (c === "aborted") return;
+    if (c === "network") {
+      srFails++;
+      if (micMode() === "server") { toast("Passo all'ascolto locale", "Il servizio del browser non risponde: uso la trascrizione sul server.", "amber"); return; }
     }
+    fatalListenError(SR_ERR[c] || ("Errore " + c), c);
   };
   r.onend = () => {
-    S.listening = false; $("#btnMic").classList.remove("on"); $("#live").textContent = "";
+    if (!mine()) return;
+    S.listening = false; $("#btnMic").classList.remove("on");
     if (!S.speaking && !S.busy) baseState();
-    if (S.prefs.continuous && !S.speaking) { clearTimeout(restartT); restartT = setTimeout(startListening, 350); }
+    $("#live").textContent = "";
+    if (S.prefs.continuous && !S.speaking && !S.fatalListen) { clearTimeout(restartT); restartT = setTimeout(startListening, 350); }
   };
-  return r;
+  try { r.start(); }
+  catch (e) { rec = null; toast("Non riesco ad avviare l'ascolto", e.message || String(e), "red"); return; }
+  // Se il browser non dà nessun segnale (né avvio né errore) lo diciamo: meglio un messaggio che il silenzio.
+  let waited = 0;
+  const check = async () => {
+    if (!mine() || S.listening) return;
+    let perm = "?"; try { perm = (await navigator.permissions.query({ name: "microphone" })).state; } catch { }
+    if (perm === "prompt" && waited < 20000) { waited += 5000; return setTimeout(check, 5000); }   // sta ancora aspettando il tuo «Consenti»
+    rec = null; try { r.abort(); } catch { } srFails += 2;
+    $("#btnMic").classList.remove("on"); baseState();
+    if (micMode() === "server") { toast("Passo all'ascolto locale", "Il riconoscimento del browser non è partito.", "amber"); listenViaServer(); }
+    else { toast("Il browser non ha avviato l'ascolto", "Probabile Brave/Chromium/Firefox o nessun accesso a internet. Apro il test del microfono.", "red"); openMicTest(); }
+  };
+  setTimeout(check, 3500);
 }
-function startListening() {
-  if (!SR) { toast("Riconoscimento vocale non disponibile", "Usa Chrome, Edge o Safari, oppure scrivi il comando.", "amber"); return; }
-  if (S.listening || S.speaking) return;
-  stopSpeaking();
-  rec = rec || makeRec();
-  try { rec.start(); } catch { }
+
+/* Ascolto tramite il server: registra finché smetti di parlare, poi trascrive in locale (faster-whisper). */
+async function listenViaServer() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { toast("Ascolto non disponibile", "Il browser non può registrare l'audio (serve localhost o HTTPS).", "red"); return; }
+  if (S.listening) return;
+  S.listening = true; $("#btnMic").classList.add("on"); setState("listening"); $("#live").textContent = "Consenti il microfono se il browser lo chiede…";
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) {
+    S.listening = false; $("#btnMic").classList.remove("on"); $("#live").textContent = ""; baseState();
+    fatalListenError(e.name === "NotAllowedError" ? SR_ERR["not-allowed"] : e.name === "NotFoundError" ? SR_ERR["audio-capture"] : e.message, e.name); return;
+  }
+  if (!S.listening) { stream.getTracks().forEach(t => t.stop()); return; }   // nel frattempo hai annullato
+  const mime = pickMime(), chunks = [];
+  let mr, ac, an, tick, hard, finished = false, cancelled = false, spoke = false;
+  const t0 = Date.now(); let last = t0;
+  const cleanup = () => {
+    clearInterval(tick); clearTimeout(hard); stream.getTracks().forEach(t => t.stop()); try { ac && ac.close().catch(() => { }); } catch { }
+    S.srvStop = null; S.listening = false; $("#btnMic").classList.remove("on"); $("#hud").classList.remove("lvl"); $("#live").textContent = ""; baseState();
+  };
+  try {
+    mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    // L'AudioContext può nascere "sospeso" (regole di autoplay) e allora non sentirebbe mai la voce: lo riattiviamo.
+    ac = new (window.AudioContext || window.webkitAudioContext)(); await ac.resume().catch(() => { });
+    an = ac.createAnalyser(); an.fftSize = 1024; ac.createMediaStreamSource(stream).connect(an);
+  } catch (e) { cleanup(); toast("Ascolto non riuscito", e.message || String(e), "red"); return; }
+  const meterOk = ac.state === "running";          // se non è affidabile: finestra fissa, decide il modello (ha il suo filtro silenzio)
+  if (!meterOk) { spoke = true; $("#live").textContent = "Parla ora (tocca il microfono per inviare)…"; }
+  else $("#live").textContent = "Parla pure…";
+  $("#hud").classList.toggle("lvl", meterOk);
+  const buf = new Uint8Array(an.fftSize);
+  mr.ondataavailable = e => e.data.size && chunks.push(e.data);
+  const stopNow = () => { if (mr.state !== "inactive") mr.stop(); else finish(); };
+  tick = setInterval(() => {
+    const now = Date.now();
+    if (meterOk) {
+      an.getByteTimeDomainData(buf); let m = 0; for (const v of buf) m = Math.max(m, Math.abs(v - 128));
+      const lvl = m / 128; $("#hud").style.setProperty("--lvl", lvl.toFixed(2));
+      if (lvl > .06) { spoke = true; last = now; }
+      if ((spoke && now - last > 1300) || (!spoke && now - t0 > 7000)) stopNow();
+    } else if (now - t0 > 6000) stopNow();
+    if (mr.state === "inactive") stopNow();        // il registratore si è fermato da solo
+  }, 90);
+  hard = setTimeout(stopNow, 15000);                // rete di sicurezza assoluta
+  // send=true: invia ciò che hai detto finora (secondo clic sul microfono); false: scarta (es. quando lei inizia a parlare)
+  S.srvStop = (send = false) => { cancelled = !send; stopNow(); };
+  const finish = async () => {
+    if (finished) return; finished = true; cleanup();
+    if (cancelled) return;
+    if (!spoke || !chunks.length) { $("#live").textContent = "Non ti ho sentito: riprova."; if (S.prefs.continuous) resumeListening(); return; }
+    $("#live").textContent = S.status?.stt?.ready ? "Trascrivo…" : "Carico il modello vocale (solo la prima volta)…"; setState("thinking");
+    try {
+      const fd = new FormData(); fd.append("audio", new Blob(chunks, { type: mr.mimeType || "audio/webm" }), "voce");
+      const r = await api("/api/transcribe", { method: "POST", body: fd });
+      $("#live").textContent = ""; baseState();
+      if (r.text) onUtterance(r.text); else { $("#live").textContent = "Non ho capito: riprova."; if (S.prefs.continuous) resumeListening(); }
+    } catch (e) { $("#live").textContent = ""; baseState(); toast("Trascrizione non riuscita", e.message, "red"); }
+  };
+  mr.onstop = finish;
+  try { mr.start(250); } catch (e) { cleanup(); toast("Registrazione non avviata", e.message || String(e), "red"); }
 }
-function stopListening() { clearTimeout(restartT); try { rec && rec.abort(); } catch { } S.listening = false; $("#btnMic").classList.remove("on"); baseState(); }
-function pauseListening() { try { rec && rec.abort(); } catch { } S.listening = false; $("#btnMic").classList.remove("on"); }
-function resumeListening() { if (S.prefs.continuous && !S.busy) { clearTimeout(restartT); restartT = setTimeout(startListening, 500); } }
+
+function stopListening() {
+  clearTimeout(restartT); if (S.srvStop) { S.srvStop(true); return; }
+  const r = rec; rec = null; try { r && r.abort(); } catch { }
+  S.listening = false; $("#btnMic").classList.remove("on"); $("#live").textContent = ""; baseState();
+}
+function pauseListening() {
+  clearTimeout(restartT); S.srvStop?.(false);
+  const r = rec; rec = null; try { r && r.abort(); } catch { }
+  S.listening = false; $("#btnMic").classList.remove("on");
+}
+function resumeListening() { if (S.prefs.continuous && !S.busy && !S.fatalListen) { clearTimeout(restartT); restartT = setTimeout(startListening, 500); } }
 
 function wakeName() { return (S.status?.settings.assistente || "aria").toLowerCase(); }
 function onUtterance(text) {
@@ -143,12 +258,59 @@ function onUtterance(text) {
   const low = text.toLowerCase(), w = wakeName();
   if (S.pendingWake && Date.now() < S.pendingWake) { S.pendingWake = null; return send(text); }
   const i = low.indexOf(w);
-  if (i < 0) return;                                   // ascolto continuo: ignora se non mi chiami
+  if (i < 0) return resumeListening();                 // ascolto continuo: ignora se non mi chiami
   const rest = text.slice(i + w.length).replace(/^[\s,.:!]+/, "");
   if (rest.length > 1) send(rest);
   else { S.pendingWake = Date.now() + 9000; speak("Dimmi."); }
 }
-$("#btnMic").addEventListener("click", () => { S.listening ? stopListening() : startListening(); });
+
+/* Il pulsante funziona sempre: se sto parlando mi zittisce e ascolta subito. */
+function micClick() {
+  if (S.speaking) { stopSpeaking(); baseState(); startListening(); return; }
+  S.listening ? stopListening() : startListening();
+}
+$("#btnMic").addEventListener("click", micClick);
+$("#hud").addEventListener("click", () => { if (S.speaking) { stopSpeaking(); baseState(); } });
+
+/* Test guidato: dice esattamente cosa blocca il microfono. */
+async function openMicTest() {
+  let perm = "sconosciuto";
+  try { perm = (await navigator.permissions.query({ name: "microphone" })).state; } catch { }
+  const srv = !!S.status?.stt_server, brave = !!navigator.brave;
+  const rows = [
+    ["Pagina sicura (localhost o HTTPS)", window.isSecureContext, window.isSecureContext ? "" : "Apri http://localhost:8000 sul PC, oppure avvia con --https."],
+    ["Riconoscimento vocale del browser", !!SR, SR ? (brave ? "Brave lo include ma di solito non funziona: usa Chrome o Edge." : "") : (IS_OPERA ? "Opera non include il servizio vocale di Google: da solo non può ascoltarti." : "Questo browser non lo ha (Firefox, alcuni Safari).") + " Soluzione: installa la trascrizione locale (riga sotto) oppure usa Chrome o Edge."],
+    ["Trascrizione locale sul server (faster-whisper)", srv, srv ? (S.status.stt.ready ? "Pronta." : S.status.stt.error ? "Errore nel modello: " + S.status.stt.error : "Sto caricando il modello vocale (la prima volta lo scarica, serve internet: può volerci un minuto).") : "Non installata. Nel terminale: pip install faster-whisper — poi chiudi e riavvia python run.py."],
+    ["Permesso del microfono", perm === "granted", perm === "denied" ? "Bloccato: consentilo dal lucchetto vicino all'indirizzo e ricarica." : perm === "prompt" ? "Il browser lo chiederà alla prima prova: premi «Consenti»." : ""],
+  ];
+  const sh = openModal(`<h3>Test del microfono</h3>
+    <div>${rows.map(([l, ok, h]) => `<div class="mini"><span>${ok ? "✅" : "⚠️"} ${esc(l)}${h ? `<br><span class="muted">${esc(h)}</span>` : ""}</span></div>`).join("")}</div>
+    <h4>1. Il microfono sente?</h4>
+    <div class="meter"><i id="mtBar" style="width:0%;background:var(--cy)"></i></div>
+    <div class="acts"><button class="btn" id="mtLvl">Prova per 4 secondi</button></div>
+    <h4>2. Il riconoscimento capisce?</h4>
+    <div class="acts"><button class="btn" id="mtSr">Prova a dire qualcosa</button></div>
+    <div id="mtOut" class="verdict ok" style="display:none;margin-top:12px"></div>`);
+  const out = (t, kind = "ok") => { const o = $("#mtOut", sh); o.style.display = ""; o.className = "verdict " + (kind === "bad" ? "spam" : kind); o.textContent = t; };
+  $("#mtLvl", sh).onclick = async () => {
+    let st; try { st = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) { return out(e.name === "NotAllowedError" ? SR_ERR["not-allowed"] : e.name === "NotFoundError" ? SR_ERR["audio-capture"] : (e.message || String(e)), "bad"); }
+    const ac = new (window.AudioContext || window.webkitAudioContext)(), an = ac.createAnalyser(); an.fftSize = 1024; ac.createMediaStreamSource(st).connect(an);
+    const buf = new Uint8Array(an.fftSize); let peak = 0; out("Sto ascoltando: parla o batti le mani…");
+    const iv = setInterval(() => { an.getByteTimeDomainData(buf); let m = 0; for (const v of buf) m = Math.max(m, Math.abs(v - 128)); peak = Math.max(peak, m / 128); const b = $("#mtBar"); if (b) b.style.width = Math.min(100, m / 128 * 220) + "%"; }, 60);
+    setTimeout(() => { clearInterval(iv); st.getTracks().forEach(t => t.stop()); ac.close().catch(() => { });
+      out(peak > .05 ? "Il microfono funziona: il segnale arriva." : "Nessun segnale. Controlla che sia il microfono giusto in Impostazioni di sistema > Suono > Ingresso, e che non sia disattivato.", peak > .05 ? "ok" : "bad"); }, 4000);
+  };
+  $("#mtSr", sh).onclick = async () => {
+    if (micMode() === "server") { out("Parla ora: uso la trascrizione sul server (si ferma da sola quando smetti)…", "suspect"); closeModal(); startListening(); return; }
+    if (!SR) return out("Questo browser non ha il riconoscimento vocale: " + (srv ? "userò quello del server." : "usa Chrome o Edge, oppure installa faster-whisper."), "bad");
+    const t = new SR(); t.lang = "it-IT"; t.interimResults = true;
+    out("Parla ora…", "suspect");
+    t.onresult = e => out("Ho capito: «" + [...e.results].map(r => r[0].transcript).join(" ") + "»", e.results[e.results.length - 1].isFinal ? "ok" : "suspect");
+    t.onerror = e => out(SR_ERR[e.error] || ("Errore: " + e.error + (e.error === "no-speech" ? " (non ho sentito nulla, riprova)" : "")), "bad");
+    try { t.start(); } catch (e) { out(String(e), "bad"); }
+  };
+}
+$("#chipMic").addEventListener("click", openMicTest);
 
 /* ------------------------------------------------------------------ chat */
 function addMsg(kind, text, extra) {
@@ -174,8 +336,16 @@ function repliesBox(rs, source) {
   s.textContent = source === "llm" ? "Scritte dal modello locale" : "Modelli di risposta (nessun modello attivo)";
   box.append(s); return box;
 }
+// Mentre registri, una frase corta di stop ferma subito la registrazione, senza passare dal server
+// (così funziona anche se il riconoscimento sbaglia una parola o il server è lento).
+const STOP_REC = /^\W*(?:ok\W+|aria\W+|per favore\W+)*(?:ferma\w*|stop|basta|fine|termina\w*|smett\w*|chiud\w*|finisci|interrompi)\b(?:.*\b(?:registr\w*|audio|tutto)\b)?\W*$/i;
 async function send(text) {
-  text = text.trim(); if (!text || S.busy) return;
+  text = text.trim(); if (!text) return;
+  if (S.recording && STOP_REC.test(text) && text.split(/\s+/).length <= 6) {
+    addMsg("me", text); $("#txt").value = ""; stopRecording(); stopSpeaking();
+    addMsg("ai", "Registrazione fermata. La trovi nel pannello Registrazioni."); return;
+  }
+  if (S.busy) return;
   addMsg("me", text); $("#txt").value = ""; S.busy = true; setState("thinking");
   try {
     const out = await api("/api/chat", { body: { text, history: S.history.slice(-8) } });
@@ -350,7 +520,7 @@ function openModal(html) {
 }
 function closeModal() { $("#modal").hidden = true; }
 $("#modal").addEventListener("click", e => { if (e.target.id === "modal" || e.target.closest("[data-close]")) closeModal(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); if (S.speaking) { stopSpeaking(); baseState(); } } });
 
 async function openReport(period = "24h", speakIt = false) {
   const r = await api("/api/report?period=" + period), c = r.counts;
@@ -432,7 +602,7 @@ async function openSettings() {
     <div class="f"><label>Tono</label><input id="stPitch" type="range" min=".6" max="1.5" step=".05" value="${S.prefs.pitch}"></div></div>
     <label class="sw"><input type="checkbox" id="stSpeak" ${S.prefs.speak ? "checked" : ""}> Rispondi sempre anche a voce</label>
     <label class="sw"><input type="checkbox" id="stCont" ${S.prefs.continuous ? "checked" : ""}> Ascolto continuo: attivami dicendo «${esc(set.assistente)}…»</label>
-    <div class="acts" style="margin:6px 0"><button class="btn sm" id="stTest">Prova la voce</button><button class="btn sm ghost" id="stNotif">Attiva notifiche</button></div>
+    <div class="acts" style="margin:6px 0"><button class="btn sm" id="stTest">Prova la voce</button><button class="btn sm ghost" id="stNotif">Attiva notifiche</button><button class="btn sm ghost" id="stMic">Testa il microfono</button></div>
     <p class="muted" style="font-size:13px">Voce del server: ${esc(tts.engine)}. Per usare una voce tua o diversa metti i file .onnx di Piper nella cartella <code>voci/</code> (vedi README).</p>
     <h4>Cervello</h4><p class="muted">${st.llm.available ? `Modello locale attivo: <b>${esc(st.llm.model)}</b> (${esc(st.llm.backend)})` : "Nessun modello locale: funziono con le regole base. Installa Ollama per le conversazioni libere (vedi README)."}</p>
     <h4>Email</h4><div class="acts"><button class="btn sm" id="stMail" ${st.mail ? "" : "disabled"}>Controlla la posta ora</button></div>
@@ -448,6 +618,7 @@ async function openSettings() {
   $("#stV", sh).value = S.prefs.voice || "";
   const collect = () => { S.prefs.voice = $("#stV", sh).value; S.prefs.rate = +$("#stRate", sh).value; S.prefs.pitch = +$("#stPitch", sh).value; S.prefs.speak = $("#stSpeak", sh).checked; S.prefs.continuous = $("#stCont", sh).checked; savePrefs(); };
   $("#stTest", sh).onclick = () => { collect(); speak(`Ciao ${$("#stU", sh).value}, sono ${$("#stA", sh).value}. Questa è la mia voce.`); };
+  $("#stMic", sh).onclick = () => openMicTest();
   $("#stNotif", sh).onclick = async () => { const p = await Notification?.requestPermission?.(); toast("Notifiche", p === "granted" ? "Attive." : "Non consentite dal browser."); };
   $("#stMail", sh).onclick = async () => { const r = await api("/api/mail/sync", { method: "POST", body: {} }); toast(r.ok ? "Posta controllata" : "Errore posta", r.ok ? `${r.new} nuove email` : r.error, r.ok ? "" : "red"); refreshAll(); };
   sh.addEventListener("click", async e => {
@@ -478,7 +649,9 @@ async function loadStatus() {
   const nm = st.settings.assistente; $("#brandName").textContent = dotted(nm); $("#hudName").textContent = dotted(nm); $("#hud").style.setProperty("--nl", dotted(nm).length); document.title = nm + " · segretaria";
   chip("#chipLlm", st.llm.available ? true : "mid", st.llm.available ? st.llm.model : "regole base");
   chip("#chipVoice", st.tts.engine !== "browser" ? true : "mid", st.tts.engine === "piper" ? "Piper" : st.tts.engine === "espeak" ? "eSpeak" : "del browser");
-  chip("#chipMic", SR ? true : "mid", SR ? "pronto" : "solo testo");
+  const mm = micMode(), sttOk = st.stt?.ready;
+  chip("#chipMic", mm === "none" ? "mid" : mm === "server" && !sttOk ? "mid" : true,
+    mm === "browser" ? "browser" : mm === "server" ? (sttOk ? "locale" : st.stt?.error ? "locale · errore" : "locale · carico…") : "solo testo · clicca");
   $("#stats").innerHTML = `<span class="stat red"><b>${st.counts.spam_total}</b> spam fermato</span><span class="stat amber"><b>${st.counts.calls_missed}</b> perse</span><span class="stat"><b>${st.counts.unread}</b> da leggere</span>`;
   updateBadges();
 }
@@ -503,6 +676,7 @@ async function refreshAll(initial) {
 (async function boot() {
   setState("idle");
   await refreshAll(true);
+  if (micMode() === "none") addMsg("ai", "Per parlarmi con " + (IS_OPERA ? "Opera" : "questo browser") + " serve la trascrizione locale: nel terminale scrivi  pip install faster-whisper  e riavvia. Intanto puoi scrivermi qui sotto. Clicca «Ascolto» in alto per la guida.");
   addMsg("ai", S.status?.empty ? `Ciao, sono ${S.status.settings.assistente}. Per cominciare scrivimi un comando, oppure carica i dati demo dal pannello a sinistra.` : "Pronta. Dimmi pure.");
   setInterval(() => loadInbox().then(loadStatus).catch(() => { }), 20000);
   setInterval(pollDue, 15000); pollDue();
