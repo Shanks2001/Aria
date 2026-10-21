@@ -108,7 +108,7 @@ function stopSpeaking() {
 // Opera (come Brave e Chromium) espone SpeechRecognition ma senza il servizio vocale: non funziona mai. La escludiamo.
 const IS_OPERA = /\bOPR\/|Opera/.test(navigator.userAgent);
 const SR = IS_OPERA ? null : (window.SpeechRecognition || window.webkitSpeechRecognition);
-let rec = null, restartT = null, srFails = 0;
+let rec = null, restartT = null, srFails = 0, netWarned = false;
 const SR_ERR = {
   "not-allowed": "Il browser ha bloccato il microfono. Clicca il lucchetto vicino all'indirizzo, consenti il microfono e ricarica la pagina.",
   "service-not-allowed": "Il browser non permette il riconoscimento vocale su questa pagina: serve localhost o HTTPS.",
@@ -130,6 +130,7 @@ function fatalListenError(msg, code) {
 
 function startListening() {
   if (S.listening) return;
+  if (S.busy) return;   // Aria sta ancora rispondendo: aspetta prima di riascoltare
   if (S.speaking) stopSpeaking();
   const mode = micMode();
   if (mode === "none") { toast("Per parlarmi serve un passo in più", "Questo browser non ha il riconoscimento vocale. Apro la guida.", "amber"); openMicTest(); return; }
@@ -145,7 +146,7 @@ function startListening() {
     let interim = "", final = "";
     for (let i = ev.resultIndex; i < ev.results.length; i++) { const t = ev.results[i][0].transcript; ev.results[i].isFinal ? final += t : interim += t; }
     $("#live").textContent = interim || final;
-    if (final.trim()) { srFails = 0; onUtterance(final.trim()); }
+    if (final.trim()) { srFails = 0; netWarned = false; onUtterance(final.trim()); }
   };
   r.onerror = e => {
     if (!mine()) return;
@@ -153,8 +154,15 @@ function startListening() {
     if (c === "no-speech") { if (!S.prefs.continuous) $("#live").textContent = "Non ti ho sentito: riprova."; return; }   // in ascolto continuo il silenzio è normale: niente messaggio
     if (c === "aborted") return;
     if (c === "network") {
+      // Un "network" isolato è spesso solo un intoppo passeggero del servizio vocale di Google: non è un errore del
+      // microfono né della pagina. Riproviamo da soli un paio di volte prima di disturbarti con un avviso.
       srFails++;
       if (micMode() === "server") { toast("Passo all'ascolto locale", "Il servizio del browser non risponde: uso la trascrizione sul server.", "amber"); return; }
+      if (srFails >= 3 && !netWarned) {
+        netWarned = true;
+        toast("Il microfono non raggiunge il servizio vocale", "Non è un guasto di Aria: succede quando Edge/Chrome non riescono a parlare con il servizio vocale di Google. Controlla la connessione a internet, e se hai un'estensione (ad blocker, VPN, antivirus) che blocca le richieste di rete, provala disattivata su questa pagina. Continuo a riprovare da solo; intanto puoi scrivermi.", "amber");
+      }
+      return;   // niente fatalListenError: resta in ascolto continuo e riprova, invece di spegnersi
     }
     fatalListenError(SR_ERR[c] || ("Errore " + c), c);
   };
@@ -163,7 +171,9 @@ function startListening() {
     S.listening = false; $("#btnMic").classList.remove("on");
     if (!S.speaking && !S.busy) baseState();
     $("#live").textContent = "";
-    if (S.prefs.continuous && !S.speaking && !S.fatalListen) { clearTimeout(restartT); restartT = setTimeout(startListening, 350); }
+    // Dopo errori di rete ripetuti rallentiamo i tentativi (ogni 20s invece che ogni 350ms), per non martellare un servizio che non risponde.
+    const delay = srFails >= 3 ? 20000 : 350;
+    if (S.prefs.continuous && !S.speaking && !S.busy && !S.fatalListen) { clearTimeout(restartT); restartT = setTimeout(startListening, delay); }
   };
   try { r.start(); }
   catch (e) { rec = null; toast("Non riesco ad avviare l'ascolto", e.message || String(e), "red"); return; }
@@ -257,6 +267,11 @@ function resumeListening() { if (S.prefs.continuous && !S.busy && !S.fatalListen
 
 function wakeName() { return (S.status?.settings.assistente || "aria").toLowerCase(); }
 function onUtterance(text) {
+  if (S.recording) {                                    // in registrazione: unica condizione, solo la frase di stop conta
+    const clean = text.trim();
+    if (STOP_REC.test(clean) && clean.split(/\s+/).length <= 6) send(text);
+    return;                                              // tutto il resto resta nell'audio registrato, non diventa un comando
+  }
   if (!S.prefs.continuous) return send(text);          // tocca-e-parla: tutto ciò che dici è un comando
   if (S.prefs.wake === false) return send(text);       // sempre in ascolto, senza bisogno del nome
   const low = text.toLowerCase(), w = wakeName();
@@ -272,6 +287,7 @@ const openConversation = () => { S.pendingWake = Date.now() + 25000; };   // dop
 /* Il pulsante funziona sempre: se sto parlando mi zittisce e ascolta subito. */
 function micClick() {
   if (S.speaking) { stopSpeaking(); baseState(); startListening(); return; }
+  if (S.busy) { toast("Un momento", "Sto ancora rispondendo: il microfono riparte da solo appena ho finito."); return; }
   if (S.listening) { S.prefs.continuous = false; savePrefs(); stopListening(); toast("Microfono spento", "Tocca di nuovo per riattivarlo"); }
   else { S.prefs.continuous = true; savePrefs(); startListening(); }
 }
@@ -709,7 +725,7 @@ async function refreshAll(initial) {
   setInterval(() => { if (srFails > 0) srFails--; }, 60000);      // dopo un po riprova col browser
   if (S.prefs.continuous) { if (navigator.userActivation?.hasBeenActive) startListening(); else $("#live").textContent = "Tocca la pagina per attivare il microfono…"; }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => { });
-  const kick = () => { if (S.prefs.continuous && !S.listening && !S.speaking && !S.fatalListen) startListening(); };
+  const kick = () => { if (S.prefs.continuous && !S.listening && !S.speaking && !S.busy && !S.fatalListen) startListening(); };
   ["pointerdown", "keydown"].forEach(ev => document.addEventListener(ev, kick, { once: true }));
   setInterval(() => { if (document.visibilityState === "visible" && S.prefs.continuous && !S.listening && !S.speaking && !S.busy && !S.fatalListen) startListening(); }, 4000);
 })();
