@@ -110,9 +110,9 @@ def _fmt_item(a: dict, n: datetime) -> str:
 def context() -> str:
     n = now()
     s = settings()
-    ag = db.q("SELECT * FROM agenda WHERE done=0 ORDER BY when_ts IS NULL, when_ts LIMIT 8")
+    ag = db.q("SELECT * FROM agenda WHERE done=0 ORDER BY when_ts IS NULL, when_ts LIMIT 5")
     r = report.build("24h", n)
-    recent = db.q("SELECT * FROM events WHERE verdict!='spam' ORDER BY ts DESC LIMIT 6")
+    recent = db.q("SELECT * FROM events WHERE verdict!='spam' ORDER BY ts DESC LIMIT 4")
     lines = [f"Adesso: {n:%A %d/%m/%Y %H:%M}.", f"Utente: {s['utente']}.",
              "Impegni aperti: " + ("; ".join(_fmt_item(a, n) for a in ag) or "nessuno") + ".",
              "Ultime 24h: " + r["spoken"]]

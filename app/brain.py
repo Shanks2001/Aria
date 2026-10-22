@@ -18,6 +18,10 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 OPENAI_URL = os.getenv("LLM_URL", "http://127.0.0.1:8080").rstrip("/")
 OPENAI_MODEL = os.getenv("LLM_MODEL", "local")
 PREFERRED = ("qwen2.5", "llama3", "gemma", "phi", "mistral")
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "1024"))
+OLLAMA_NUM_THREAD = os.getenv("OLLAMA_NUM_THREAD", "")
+MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "180"))
 
 _status: dict = {"t": 0.0, "data": {"available": False, "backend": "regole", "model": ""}}
 
@@ -59,15 +63,18 @@ def persona(assistente: str, utente: str) -> str:
     return txt.replace("{assistente}", assistente).replace("{utente}", utente)
 
 
-def complete(messages: list[dict], max_tokens: int = 320, temperature: float = 0.4, timeout: float = 90.0) -> str | None:
+def complete(messages: list[dict], max_tokens: int = MAX_TOKENS, temperature: float = 0.4, timeout: float = 120.0) -> str | None:
     st = status()
     if not st["available"]:
         return None
     try:
         if st["backend"] == "ollama":
+            options = {"temperature": temperature, "num_predict": max_tokens, "num_ctx": OLLAMA_NUM_CTX}
+            if OLLAMA_NUM_THREAD:
+                options["num_thread"] = int(OLLAMA_NUM_THREAD)
             r = _http(OLLAMA_URL + "/api/chat", {
-                "model": st["model"], "messages": messages, "stream": False, "keep_alive": "30m",
-                "options": {"temperature": temperature, "num_predict": max_tokens}}, timeout)
+                "model": st["model"], "messages": messages, "stream": False, "keep_alive": OLLAMA_KEEP_ALIVE,
+                "options": options}, timeout)
             return (r.get("message", {}).get("content") or "").strip() or None
         r = _http(OPENAI_URL + "/v1/chat/completions", {
             "model": st["model"], "messages": messages, "max_tokens": max_tokens,
@@ -80,7 +87,7 @@ def complete(messages: list[dict], max_tokens: int = 320, temperature: float = 0
 
 def chat(history: list[dict], text: str, context: str, assistente: str, utente: str) -> str | None:
     system = persona(assistente, utente) + "\n\nCONTESTO ATTUALE (usa solo questi dati):\n" + context
-    msgs = [{"role": "system", "content": system}] + history[-8:] + [{"role": "user", "content": text}]
+    msgs = [{"role": "system", "content": system}] + history[-4:] + [{"role": "user", "content": text}]
     out = complete(msgs)
     return re.sub(r"<think>.*?</think>", "", out, flags=re.S).strip() if out else None
 
@@ -168,7 +175,7 @@ def suggest_replies(msg: dict, tone: str | None, assistente: str, utente: str) -
             "Non inventare orari, importi o fatti. Rispondi SOLO con un array JSON di 3 oggetti "
             '[{"label":"2-3 parole","text":"..."}], senza altro testo.')
         out = complete([{"role": "system", "content": persona(assistente, utente)},
-                        {"role": "user", "content": prompt}], max_tokens=420, temperature=0.6)
+                            {"role": "user", "content": prompt}], max_tokens=min(420, MAX_TOKENS * 2), temperature=0.6)
         if out:
             m = re.search(r"\[.*\]", out, re.S)
             try:

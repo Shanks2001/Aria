@@ -11,7 +11,7 @@ const store = {
 const S = {
   status: null, inboxKind: "all", events: [], lastEventId: 0, history: [], busy: false,
   speaking: false, speakId: 0, listening: false, srvStop: null, recording: null, audio: null, pendingWake: null,
-  prefs: Object.assign({ speak: true, continuous: true, wake: true, voice: "", rate: 1, pitch: 1 }, store.get("prefs", {})),
+  prefs: Object.assign({ speak: true, continuous: true, wake: true, forceLocal: false, voice: "", rate: 1, pitch: 1 }, store.get("prefs", {})),
 };
 const savePrefs = () => store.set("prefs", S.prefs);
 if (!store.get("alwaysOn1", false)) { S.prefs.continuous = true; S.prefs.wake = S.prefs.wake !== false; store.set("alwaysOn1", true); savePrefs(); }   // una tantum: microfono sempre attivo
@@ -113,12 +113,14 @@ const SR_ERR = {
   "not-allowed": "Il browser ha bloccato il microfono. Clicca il lucchetto vicino all'indirizzo, consenti il microfono e ricarica la pagina.",
   "service-not-allowed": "Il browser non permette il riconoscimento vocale su questa pagina: serve localhost o HTTPS.",
   "audio-capture": "Non trovo nessun microfono. Controlla che sia collegato e selezionato come ingresso del sistema.",
-  "network": "Il riconoscimento vocale del browser non riesce a collegarsi al suo servizio: serve internet e un browser come Chrome o Edge (non funziona su Brave, Chromium, Firefox).",
+  "network": "Il riconoscimento vocale del browser non riesce a collegarsi al suo servizio: serve internet, e un browser come Chrome o Edge (non Brave, Chromium, Firefox). Su Edge, se persiste: Impostazioni di Windows › Privacy e sicurezza › Voce › attiva «Riconoscimento vocale online».",
   "language-not-supported": "Il browser non supporta il riconoscimento vocale in italiano.",
 };
 /* modalità di ascolto disponibile: browser (SpeechRecognition) → server (faster-whisper) → nessuna */
 function micMode() {
   const srv = !!S.status?.stt_server, ready = !!S.status?.stt?.ready;
+  // Con "usa sempre l'ascolto locale" saltiamo del tutto il servizio vocale del browser: niente più dipendenza da internet.
+  if (S.prefs.forceLocal && srv && ready) return "server";
   // Il server si usa solo se il suo modello è pronto: finché sta caricando, il browser (se c'è) resta la scelta migliore.
   if (SR && (srFails < 2 || !srv || !ready)) return "browser";
   return srv ? "server" : "none";
@@ -186,8 +188,8 @@ function startListening() {
     if (navigator.userActivation && !navigator.userActivation.hasBeenActive) { rec = null; try { r.abort(); } catch { } return; }   // senza un tuo gesto il browser non lo avvia: non è un errore
     rec = null; try { r.abort(); } catch { } srFails += 2;
     $("#btnMic").classList.remove("on"); baseState();
-    if (micMode() === "server") { toast("Passo all'ascolto locale", "Il riconoscimento del browser non è partito.", "amber"); listenViaServer(); }
-    else { toast("Il browser non ha avviato l'ascolto", "Probabile Brave/Chromium/Firefox o nessun accesso a internet. Apro il test del microfono.", "red"); openMicTest(); }
+    if (micMode() === "server") { toast("Uso l'ascolto locale", "Il servizio vocale del browser non risponde: nessun problema, continuo con la trascrizione installata sul tuo PC.", "amber"); listenViaServer(); }
+    else { toast("Il browser non ha avviato l'ascolto", "Su Edge: Impostazioni di Windows › Privacy e sicurezza › Voce › attiva «Riconoscimento vocale online», poi riavvia il browser. Altrimenti: probabile Brave/Chromium/Firefox, oppure una VPN/antivirus blocca il servizio vocale. Apro il test del microfono.", "red"); openMicTest(); }
   };
   setTimeout(check, 3500);
 }
@@ -370,7 +372,7 @@ async function send(text) {
   if (S.busy) return;
   addMsg("me", text); $("#txt").value = ""; S.busy = true; setState("thinking");
   try {
-    const out = await api("/api/chat", { body: { text, history: S.history.slice(-8) } });
+    const out = await api("/api/chat", { body: { text, history: S.history.slice(-4) } });
     S.history.push({ role: "user", content: text }, { role: "assistant", content: out.reply });
     const rs = out.data?.replies;
     addMsg("ai", out.reply, rs ? repliesBox(rs, out.data.source) : null);
@@ -635,6 +637,7 @@ async function openSettings() {
     <label class="sw"><input type="checkbox" id="stSpeak" ${S.prefs.speak ? "checked" : ""}> Rispondi sempre anche a voce</label>
     <label class="sw"><input type="checkbox" id="stCont" ${S.prefs.continuous ? "checked" : ""}> Microfono sempre attivo</label>
     <label class="sw"><input type="checkbox" id="stWake" ${S.prefs.wake !== false ? "checked" : ""}> Rispondi solo se dico «${esc(set.assistente)}» (dopo una risposta puoi continuare 25 secondi senza nome)</label>
+    <label class="sw"><input type="checkbox" id="stLocal" ${S.prefs.forceLocal ? "checked" : ""} ${S.status?.stt?.ready ? "" : "disabled"}> Usa sempre l'ascolto locale, mai il servizio vocale del browser${S.status?.stt?.ready ? "" : " (disponibile quando la trascrizione locale è pronta)"}</label>
     <div class="acts" style="margin:6px 0"><button class="btn sm" id="stTest">Prova la voce</button><button class="btn sm ghost" id="stNotif">Attiva notifiche</button><button class="btn sm ghost" id="stMic">Testa il microfono</button></div>
     <p class="muted" style="font-size:13px">Voce del server: ${esc(tts.engine)}. Per usare una voce tua o diversa metti i file .onnx di Piper nella cartella <code>voci/</code> (vedi README).</p>
     <h4>Cervello</h4><p class="muted">${st.llm.available ? `Modello locale attivo: <b>${esc(st.llm.model)}</b> (${esc(st.llm.backend)})` : "Nessun modello locale: funziono con le regole base. Installa Ollama per le conversazioni libere (vedi README)."}</p>
@@ -650,7 +653,7 @@ async function openSettings() {
     <h4>Aria</h4><div class="acts"><button class="btn sm red" id="stOff">Spegni Aria in sicurezza</button></div>
     <div class="acts" style="margin-top:16px"><button class="btn" id="stSave">Salva</button></div>`);
   $("#stV", sh).value = S.prefs.voice || "";
-  const collect = () => { S.prefs.voice = $("#stV", sh).value; S.prefs.rate = +$("#stRate", sh).value; S.prefs.pitch = +$("#stPitch", sh).value; S.prefs.speak = $("#stSpeak", sh).checked; S.prefs.continuous = $("#stCont", sh).checked; S.prefs.wake = $("#stWake", sh).checked; savePrefs(); };
+  const collect = () => { S.prefs.voice = $("#stV", sh).value; S.prefs.rate = +$("#stRate", sh).value; S.prefs.pitch = +$("#stPitch", sh).value; S.prefs.speak = $("#stSpeak", sh).checked; S.prefs.continuous = $("#stCont", sh).checked; S.prefs.wake = $("#stWake", sh).checked; S.prefs.forceLocal = $("#stLocal", sh).checked; savePrefs(); };
   $("#stTest", sh).onclick = () => { collect(); speak(`Ciao ${$("#stU", sh).value}, sono ${$("#stA", sh).value}. Questa è la mia voce.`); };
   $("#stMic", sh).onclick = () => openMicTest();
   $("#stNotif", sh).onclick = async () => { const p = await Notification?.requestPermission?.(); toast("Notifiche", p === "granted" ? "Attive." : "Non consentite dal browser."); };
